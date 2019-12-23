@@ -48,11 +48,7 @@ func NewClusterWriter(l log.Logger, h Hashring, cluster *Cluster) *ClusterWriter
 	}
 }
 
-func (w *ClusterWriter) Write(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
-	return w.forward(ctx, tenant, r, ts)
-}
-
-// forward accepts a write request, batches its time series by
+// Write accepts a write request, batches its time series by
 // corresponding endpoint, and forwards them in parallel to the
 // correct endpoint. Requests destined for the local node are written
 // the the local receiver. For a given write request, at most one outgoing
@@ -60,7 +56,7 @@ func (w *ClusterWriter) Write(ctx context.Context, tenant string, r replica, ts 
 // unless the request needs to be replicated.
 // The function only returns when all requests have finished
 // or the context is canceled.
-func (w *ClusterWriter) forward(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
+func (w *ClusterWriter) Write(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
 	wreqs := make(map[string]*prompb.WriteRequest)
 	replicas := make(map[string]replica)
 
