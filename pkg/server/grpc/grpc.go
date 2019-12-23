@@ -87,6 +87,19 @@ func New(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer
 	}
 }
 
+// ReadWriteStoreServer is a StoreServer and a WriteableStoreServer
+type ReadWriteStoreServer interface {
+	storepb.StoreServer
+	storepb.WriteableStoreServer
+}
+
+// NewReadWrite creates a new server that can be written to
+func NewReadWrite(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer, comp component.Component, storeSrv ReadWriteStoreServer, opts ...Option) *Server {
+	s := New(logger, reg, tracer, comp, storeSrv, opts...)
+	storepb.RegisterWriteableStoreServer(s.srv, storeSrv)
+	return s
+}
+
 // ListenAndServe listens on the TCP network address and handles requests on incoming connections.
 func (s *Server) ListenAndServe() error {
 	l, err := net.Listen("tcp", s.opts.listen)

@@ -2,13 +2,16 @@ package store
 
 import (
 	"context"
+	"io"
 	"math"
 	"sort"
 
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/thanos-io/thanos/pkg/component"
@@ -17,6 +20,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+const streamCommitChunkSize = 500
 
 // TSDBStore implements the store API against a local TSDB instance.
 // It attaches the provided external labels to all results. It only responds with raw data
@@ -229,4 +234,65 @@ func (s *TSDBStore) LabelValues(ctx context.Context, r *storepb.LabelValuesReque
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &storepb.LabelValuesResponse{Values: res}, nil
+}
+
+// RemoteWrite receives a stream of write requests and performs a remote write action with them
+func (s *TSDBStore) RemoteWrite(stream storepb.Store_RemoteWriteServer) error {
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			level.Error(s.logger).Log("msg", "read from grpc stream failure", "err", err)
+			return err
+		}
+
+		// Write all metrics sent
+		WriteTimeSeries(resp.Timeseries, s.db, s.logger)
+	}
+	return nil
+}
+
+// WriteTimeSeries writes a set of timeseries metrics to the tsdb
+func WriteTimeSeries(timeseries []prompb.TimeSeries, tsdb *tsdb.DB, logger log.Logger) {
+	ap := tsdb.Appender()
+
+	commit := func() {
+		if err := ap.Commit(); err != nil {
+			level.Error(logger).Log("msg", "failure trying to commit write to store", "err", err)
+			if err := ap.Rollback(); err != nil {
+				level.Error(logger).Log("msg", "failure trying to rollback write to store", "err", err)
+			}
+		}
+	}
+	defer commit()
+
+	for i, ts := range timeseries {
+		if i%streamCommitChunkSize == 0 {
+			commit()
+		}
+		lbls := make(labels.Labels, len(ts.Labels))
+		for i, l := range ts.Labels {
+			lbls[i] = labels.Label{
+				Name:  l.GetName(),
+				Value: l.GetValue(),
+			}
+		}
+		// soring guarantees hash consistency
+		sort.Sort(lbls)
+
+		var ref uint64
+		var err error
+		for _, s := range ts.Samples {
+			if ref == 0 {
+				ref, err = ap.Add(lbls, s.GetTimestamp(), s.GetValue())
+			} else {
+				err = ap.AddFast(ref, s.GetTimestamp(), s.GetValue())
+			}
+			if err != nil {
+				level.Error(logger).Log("msg", "failure trying to append sample to store", "err", err)
+			}
+		}
+	}
 }
