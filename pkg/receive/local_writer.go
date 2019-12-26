@@ -14,12 +14,15 @@ import (
 	terrors "github.com/prometheus/prometheus/tsdb/errors"
 )
 
+var ErrStorageNotReady = errors.New("storage is not ready")
+
 // Appendable returns an Appender.
 type Appendable interface {
 	Appender() (storage.Appender, error)
 }
 
 type LocalWriter struct {
+	mtx    sync.Mutex
 	logger log.Logger
 	append Appendable
 }
@@ -31,20 +34,29 @@ func NewLocalWriter(logger log.Logger, app Appendable) *LocalWriter {
 	}
 }
 
-func (r *LocalWriter) Write(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
+func (lw *LocalWriter) Appendable(app Appendable) {
+	lw.mtx.Lock()
+	defer lw.mtx.Unlock()
+	lw.append = app
+}
+
+func (lw *LocalWriter) Write(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
 	var (
 		numOutOfOrder  = 0
 		numDuplicates  = 0
 		numOutOfBounds = 0
 	)
+	if lw.append == nil {
+		return ErrStorageNotReady
+	}
 
-	app, err := r.append.Appender()
+	app, err := lw.append.Appender()
 	if err != nil {
 		return errors.Wrap(err, "get appender")
 	}
 
 	var errs terrors.MultiError
-	for _, t := range wreq.Timeseries {
+	for _, t := range ts {
 		lset := make(labels.Labels, len(t.Labels))
 		for j := range t.Labels {
 			lset[j] = labels.Label{
@@ -61,32 +73,36 @@ func (r *LocalWriter) Write(ctx context.Context, tenant string, r replica, ts []
 				continue
 			case storage.ErrOutOfOrderSample:
 				numOutOfOrder++
-				level.Debug(r.logger).Log("msg", "Out of order sample", "lset", lset.String(), "sample", s.String())
+				level.Debug(lw.logger).Log("msg", "Out of order sample", "lset", lset.String(), "sample", s.String())
 			case storage.ErrDuplicateSampleForTimestamp:
 				numDuplicates++
-				level.Debug(r.logger).Log("msg", "Duplicate sample for timestamp", "lset", lset.String(), "sample", s.String())
+				level.Debug(lw.logger).Log("msg", "Duplicate sample for timestamp", "lset", lset.String(), "sample", s.String())
 			case storage.ErrOutOfBounds:
 				numOutOfBounds++
-				level.Debug(r.logger).Log("msg", "Out of bounds metric", "lset", lset.String(), "sample", s.String())
+				level.Debug(lw.logger).Log("msg", "Out of bounds metric", "lset", lset.String(), "sample", s.String())
 			}
 		}
 	}
 
 	if numOutOfOrder > 0 {
-		level.Warn(r.logger).Log("msg", "Error on ingesting out-of-order samples", "num_dropped", numOutOfOrder)
+		level.Warn(lw.logger).Log("msg", "Error on ingesting out-of-order samples", "num_dropped", numOutOfOrder)
 		errs.Add(errors.Wrapf(storage.ErrOutOfOrderSample, "failed to non-fast add %d samples", numOutOfOrder))
 	}
 	if numDuplicates > 0 {
-		level.Warn(r.logger).Log("msg", "Error on ingesting samples with different value but same timestamp", "num_dropped", numDuplicates)
+		level.Warn(lw.logger).Log("msg", "Error on ingesting samples with different value but same timestamp", "num_dropped", numDuplicates)
 		errs.Add(errors.Wrapf(storage.ErrDuplicateSampleForTimestamp, "failed to non-fast add %d samples", numDuplicates))
 	}
 	if numOutOfBounds > 0 {
-		level.Warn(r.logger).Log("msg", "Error on ingesting samples that are too old or are too far into the future", "num_dropped", numOutOfBounds)
+		level.Warn(lw.logger).Log("msg", "Error on ingesting samples that are too old or are too far into the future", "num_dropped", numOutOfBounds)
 		errs.Add(errors.Wrapf(storage.ErrOutOfBounds, "failed to non-fast add %d samples", numOutOfBounds))
 	}
 
 	if err := app.Commit(); err != nil {
 		errs.Add(errors.Wrap(err, "commit samples"))
+	}
+
+	if countCause(errs, isConflict) > 0 {
+		err = errors.Wrap(conflictErr, errs.Error())
 	}
 
 	return errs.Err()

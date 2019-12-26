@@ -25,8 +25,17 @@ import (
 	"github.com/thanos-io/thanos/pkg/tracing"
 )
 
-// conflictErr is returned whenever an operation fails due to any conflict-type error.
-var conflictErr = errors.New("conflict")
+var (
+	// conflictErr is returned whenever an operation fails due to any conflict-type error.
+	conflictErr = errors.New("conflict")
+
+	forwardRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "thanos_receive_forward_requests_total",
+			Help: "The number of forward requests.",
+		}, []string{"result"},
+	)
+)
 
 // Options for the web Handler.
 type Options struct {
@@ -46,7 +55,7 @@ type Options struct {
 type Handler struct {
 	client   *http.Client
 	logger   log.Logger
-	writer   *LocalWriter
+	writer   Writer
 	router   *route.Router
 	options  *Options
 	listener net.Listener
@@ -77,7 +86,7 @@ func NewHandler(logger log.Logger, o *Options) *Handler {
 	ins := extpromhttp.NewNopInstrumentationMiddleware()
 	if o.Registry != nil {
 		ins = extpromhttp.NewInstrumentationMiddleware(o.Registry)
-		o.Registry.MustRegister(h.forwardRequestsTotal)
+		o.Registry.MustRegister(forwardRequestsTotal)
 	}
 
 	readyf := h.testReady
@@ -103,23 +112,12 @@ func (h *Handler) SetWriter(w *LocalWriter) {
 	h.writer = w
 }
 
-// Hashring sets the hashring for the handler and marks the hashring as ready.
-// The hashring must be set to a non-nil value in order for the
-// handler to be ready and usable.
-// If the hashring is nil, then the handler is marked as not ready.
-func (h *Handler) Hashring(hashring Hashring) {
-	h.mtx.Lock()
-	defer h.mtx.Unlock()
-	h.hashring = hashring
-}
-
 // Verifies whether the server is ready or not.
 func (h *Handler) isReady() bool {
 	h.mtx.RLock()
-	hr := h.hashring != nil
 	sr := h.writer != nil
 	h.mtx.RUnlock()
-	return sr && hr
+	return sr
 }
 
 // Checks if server is ready, calls f if it is, returns 503 if it is not.
@@ -216,15 +214,7 @@ func (h *Handler) receive(w http.ResponseWriter, r *http.Request) {
 
 	tenant := r.Header.Get(h.options.TenantHeader)
 
-	// Forward any time series as necessary. All time series
-	// destined for the local node will be written to the receiver.
-	// Time series will be replicated as necessary.
-	if err := h.forward(r.Context(), tenant, rep, &wreq); err != nil {
-		if countCause(err, isConflict) > 0 {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
+	if err := h.writer.Write(r.Context(), tenant, rep, wreq.Timeseries); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
 }

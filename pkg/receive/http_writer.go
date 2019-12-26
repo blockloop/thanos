@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
@@ -16,6 +17,7 @@ import (
 )
 
 type HTTPWriter struct {
+	logger        log.Logger
 	addr          string
 	c             *http.Client
 	replicaHeader string
@@ -24,44 +26,43 @@ type HTTPWriter struct {
 	mtx sync.Mutex
 }
 
-func NewHTTPWriter(addr, tenantHeader, replicaHeader string) {
+func NewHTTPWriter(logger log.Logger, addr, tenantHeader, replicaHeader string) *HTTPWriter {
 	return &HTTPWriter{
+		logger:        logger,
 		addr:          addr,
 		tenantHeader:  tenantHeader,
 		replicaHeader: replicaHeader,
 	}
 }
 
-func (w *HTTPWriter) HTTPClient(c *http.Client) error {
-	w.mtx.Lock()
-	defer w.mtx.Unlock()
-	w.c = c
+func (hw *HTTPWriter) HTTPClient(c *http.Client) {
+	hw.mtx.Lock()
+	defer hw.mtx.Unlock()
+	hw.c = c
 }
 
-func (w *HTTPWriter) Write(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
-	buf, err := proto.Marshal(&prompb.WriteRequest{ts})
+func (hw *HTTPWriter) Write(ctx context.Context, tenant string, r replica, ts []prompb.TimeSeries) error {
+	buf, err := proto.Marshal(&prompb.WriteRequest{Timeseries: ts})
 	if err != nil {
-		level.Error(w.logger).Log("msg", "marshaling proto", "err", err, "endpoint", w.addr)
-		ec <- err
-		return
+		level.Error(hw.logger).Log("msg", "marshaling proto", "err", err, "endpoint", hw.addr)
+		return err
 	}
-	req, err := http.NewRequest("POST", w.addr, bytes.NewBuffer(snappy.Encode(nil, buf)))
+	req, err := http.NewRequest("POST", hw.addr, bytes.NewBuffer(snappy.Encode(nil, buf)))
 	if err != nil {
-		level.Error(w.logger).Log("msg", "creating request", "err", err, "endpoint", w.addr)
-		ec <- err
-		return
+		level.Error(hw.logger).Log("msg", "creating request", "err", err, "endpoint", hw.addr)
+		return err
 	}
-	req.Header.Add(w.tenantHeader, tenant)
-	req.Header.Add(w.replicaHeader, strconv.FormatUint(r.n, 10))
+	req.Header.Add(hw.tenantHeader, tenant)
+	req.Header.Add(hw.replicaHeader, strconv.FormatUint(r.n, 10))
 
 	// Increment the counters as necessary now that
 	// the requests will go out.
 	defer func() {
 		if err != nil {
-			w.forwardRequestsTotal.WithLabelValues("error").Inc()
+			forwardRequestsTotal.WithLabelValues("error").Inc()
 			return
 		}
-		w.forwardRequestsTotal.WithLabelValues("success").Inc()
+		forwardRequestsTotal.WithLabelValues("success").Inc()
 	}()
 
 	// Create a span to track the request made to another receive node.
@@ -70,16 +71,15 @@ func (w *HTTPWriter) Write(ctx context.Context, tenant string, r replica, ts []p
 
 	// Actually make the request against the endpoint
 	// we determined should handle these time series.
-	res, err := w.client.Do(req.WithContext(ctx))
+	res, err := hw.c.Do(req.WithContext(ctx))
 	if err != nil {
-		level.Error(w.logger).Log("msg", "forwarding request", "err", err, "endpoint", endpoint)
-		ec <- err
-		return
+		level.Error(hw.logger).Log("msg", "forwarding request", "err", err, "endpoint", hw.addr)
+		return err
 	}
 	if res.StatusCode != http.StatusOK {
 		err = errors.New(strconv.Itoa(res.StatusCode))
-		level.Error(w.logger).Log("msg", "forwarding returned non-200 status", "err", err, "endpoint", endpoint)
-		ec <- err
-		return
+		level.Error(hw.logger).Log("msg", "forwarding returned non-200 status", "err", err, "endpoint", hw.addr)
+		return err
 	}
+	return nil
 }

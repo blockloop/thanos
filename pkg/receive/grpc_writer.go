@@ -11,7 +11,7 @@ type GRPCWriter struct {
 	c *storepb.WriteableStoreClient
 }
 
-func NewGRPCWriter(c *storepb.WriteableStoreClient) {
+func NewGRPCWriter(c *storepb.WriteableStoreClient) *GRPCWriter {
 	return &GRPCWriter{
 		c: c,
 	}
