@@ -178,6 +178,8 @@ func runReceive(
 	}
 
 	localStorage := &tsdb.ReadyStorage{}
+	localWriter := receive.NewLocalWriter(log.With(logger, "component", "local-writer"), localStorage)
+	writer := receive.NewClusterWriter(log.With(logger, "component", "cluster-writer"), localWriter, nil)
 	rwTLSConfig, err := tls.NewServerConfig(log.With(logger, "protocol", "HTTP"), rwServerCert, rwServerKey, rwServerClientCA)
 	if err != nil {
 		return err
@@ -267,7 +269,6 @@ func runReceive(
 					}
 					level.Info(logger).Log("msg", "tsdb started")
 					localStorage.Set(db.Get(), startTimeMargin)
-					webHandler.SetWriter(receive.NewWriter(log.With(logger, "component", "receive-writer"), localStorage))
 					statusProber.Ready()
 					level.Info(logger).Log("msg", "server is ready to receive web requests.")
 					dbReady <- struct{}{}
@@ -315,8 +316,7 @@ func runReceive(
 					if !ok {
 						return nil
 					}
-					webHandler.SetWriter(nil)
-					webHandler.Hashring(h)
+					writer.Hashring(h)
 					msg := "hashring has changed; server is not ready to receive web requests."
 					statusProber.NotReady(errors.New(msg))
 					level.Info(logger).Log("msg", msg)

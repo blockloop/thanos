@@ -39,7 +39,6 @@ var (
 
 // Options for the web Handler.
 type Options struct {
-	Writer            *LocalWriter
 	ListenAddress     string
 	Registry          prometheus.Registerer
 	Endpoint          string
@@ -78,7 +77,6 @@ func NewHandler(logger log.Logger, o *Options) *Handler {
 	h := &Handler{
 		client:  client,
 		logger:  logger,
-		writer:  o.Writer,
 		router:  route.New(),
 		options: o,
 	}
@@ -106,7 +104,7 @@ func NewHandler(logger log.Logger, o *Options) *Handler {
 // The writer must be set to a non-nil value in order for the
 // handler to be ready and usable.
 // If the writer is nil, then the handler is marked as not ready.
-func (h *Handler) SetWriter(w *LocalWriter) {
+func (h *Handler) SetWriter(w Writer) {
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
 	h.writer = w

@@ -34,6 +34,8 @@ type Hashring interface {
 	Get(tenant string, timeSeries *prompb.TimeSeries) (string, error)
 	// GetN returns the nth node that should handle the given tenant and time series.
 	GetN(tenant string, timeSeries *prompb.TimeSeries, n uint64) (string, error)
+	// Hosts lists all hosts associated with the hashring
+	Hosts() []string
 }
 
 // hash returns a hash for the given tenant and time series.
@@ -55,6 +57,10 @@ func hash(tenant string, ts *prompb.TimeSeries) uint64 {
 
 // SingleNodeHashring always returns the same node.
 type SingleNodeHashring string
+
+func (s SingleNodeHashring) Hosts() []string {
+	return []string{string(s)}
+}
 
 // Get implements the Hashring interface.
 func (s SingleNodeHashring) Get(tenant string, ts *prompb.TimeSeries) (string, error) {
@@ -83,6 +89,11 @@ func (s simpleHashring) GetN(tenant string, ts *prompb.TimeSeries, n uint64) (st
 		return "", &insufficientNodesError{have: uint64(len(s)), want: n + 1}
 	}
 	return s[(hash(tenant, ts)+n)%uint64(len(s))], nil
+}
+
+// Hosts lists all hosts associated with the hashring
+func (s simpleHashring) Hosts() []string {
+	return s
 }
 
 // multiHashring represents a set of hashrings.
@@ -134,6 +145,21 @@ func (m *multiHashring) GetN(tenant string, ts *prompb.TimeSeries, n uint64) (st
 		}
 	}
 	return "", errors.New("no matching hashring to handle tenant")
+}
+
+// Hosts lists all hosts associated with the hashring
+func (m *multiHashring) Hosts() []string {
+	mp := map[string]interface{}{}
+	for _, h := range m.hashrings {
+		for _, host := range h.Hosts() {
+			mp[host] = nil
+		}
+	}
+	res := []string{}
+	for k, _ := range mp {
+		res = append(res, k)
+	}
+	return res
 }
 
 // newMultiHashring creates a multi-tenant hashring for a given slice of

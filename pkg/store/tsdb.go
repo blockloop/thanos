@@ -237,7 +237,7 @@ func (s *TSDBStore) LabelValues(ctx context.Context, r *storepb.LabelValuesReque
 }
 
 // RemoteWrite receives a stream of write requests and performs a remote write action with them
-func (s *TSDBStore) RemoteWrite(stream storepb.Store_RemoteWriteServer) error {
+func (s *TSDBStore) RemoteWrite(stream storepb.WriteableStore_RemoteWriteServer) error {
 	for {
 		resp, err := stream.Recv()
 		if err == io.EOF {

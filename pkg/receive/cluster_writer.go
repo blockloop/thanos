@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/prompb"
@@ -16,13 +15,27 @@ import (
 )
 
 // Cluster is a map of address to Writer where writer can be local, http, or grpc
-type Cluster map[string]Writer
+type Cluster struct {
+	m sync.Map
+}
+
+func (c Cluster) Set(addr string, w Writer) {
+	c.m.Store(addr, w)
+}
+
+func (c Cluster) Get(addr string) (Writer, bool) {
+	if w, ok := c.m.Load(addr); ok {
+		return w.(Writer), ok
+	}
+	return nil, false
+}
 
 type ClusterWriter struct {
-	logger   log.Logger
-	options  *Options
-	hashring Hashring
-	cluster  Cluster
+	logger      log.Logger
+	LocalWriter *LocalWriter
+	options     *Options
+	hashring    Hashring
+	cluster     Cluster
 
 	mtx sync.RWMutex
 
@@ -30,11 +43,29 @@ type ClusterWriter struct {
 	forwardRequestsTotal *prometheus.CounterVec
 }
 
-func NewClusterWriter(l log.Logger, h Hashring, cluster Cluster) *ClusterWriter {
-	return &ClusterWriter{
-		logger:   l,
-		hashring: h,
-		cluster:  cluster,
+func NewClusterWriter(l log.Logger, lw *LocalWriter, h Hashring) *ClusterWriter {
+	cw := &ClusterWriter{
+		logger:  l,
+		cluster: Cluster{},
+	}
+	if h != nil {
+		cw.Hashring(h)
+	}
+	return cw
+}
+
+// Hashring sets the hashring used for writing
+func (cw *ClusterWriter) Hashring(h Hashring) {
+	cw.mtx.Lock()
+	defer cw.mtx.Unlock()
+	cw.hashring = h
+
+	for _, host := range h.Hosts() {
+		if host == cw.options.Endpoint {
+			cw.cluster.Set(cw.options.Endpoint, cw.LocalWriter)
+		} else {
+			cw.cluster.Set(host, NewHTTPWriter(cw.logger, host, cw.options.TenantHeader, cw.options.ReplicaHeader))
+		}
 	}
 }
 
@@ -108,13 +139,11 @@ func (cw *ClusterWriter) parallelizeRequests(ctx context.Context, tenant string,
 		}
 		// Make a request to the specified endpoint.
 		go func(endpoint string) {
-			w, ok := cw.cluster[endpoint]
+			w, ok := cw.cluster.Get(endpoint)
 			if !ok {
-				level.Error(cw.logger).Log("msg", "endpoint not found in cluster", "endpoint", endpoint)
-				ec <- errors.New("no endpoint in configured cluster")
-				return
+				w = NewHTTPWriter(cw.logger, endpoint, cw.options.TenantHeader, cw.options.ReplicaHeader)
+				cw.cluster.Set(endpoint, w)
 			}
-
 			ec <- w.Write(ctx, tenant, replicas[endpoint], wr.Timeseries)
 		}(endpoint)
 	}
