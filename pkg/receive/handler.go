@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -73,7 +74,7 @@ type Handler struct {
 	peers    *peerGroup
 
 	// Metrics.
-	forwardRequestsTotal *prometheus.CounterVec
+	forwardRequestsTotal *prometheus.HistogramVec
 }
 
 func NewHandler(logger log.Logger, o *Options) *Handler {
@@ -87,9 +88,9 @@ func NewHandler(logger log.Logger, o *Options) *Handler {
 		router:  route.New(),
 		options: o,
 		peers:   newPeerGroup(o.DialOpts...),
-		forwardRequestsTotal: prometheus.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "thanos_receive_forward_requests_total",
+		forwardRequestsTotal: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: "thanos_receive_forward_requests",
 				Help: "The number of forward requests.",
 			}, []string{"result"},
 		),
@@ -378,13 +379,14 @@ func (h *Handler) parallelizeRequests(ctx context.Context, tenant string, replic
 
 			// Increment the counters as necessary now that
 			// the requests will go out.
-			defer func() {
+			defer func(start time.Time) {
+				ts := time.Since(start).Seconds()
 				if err != nil {
-					h.forwardRequestsTotal.WithLabelValues("error").Inc()
+					h.forwardRequestsTotal.WithLabelValues("error").Observe(ts)
 					return
 				}
-				h.forwardRequestsTotal.WithLabelValues("success").Inc()
-			}()
+				h.forwardRequestsTotal.WithLabelValues("success").Observe(ts)
+			}(time.Now())
 
 			cl, err := h.peers.get(ctx, endpoint)
 			if err != nil {
